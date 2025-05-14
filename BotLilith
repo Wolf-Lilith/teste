@@ -1,0 +1,110 @@
+import telebot
+import requests
+import os
+import uuid
+import subprocess
+import json
+
+WIT_AI_TOKEN = 'IBFEUM3ZB6Q7OQCGJJW3AGCOVBH7HTAH'
+TELEGRAM_TOKEN = '7559992319:AAE3WjlzC9yvWOSeWgKUu6sqhTfU-6IDEuE'
+bot = telebot.TeleBot(TELEGRAM_TOKEN)
+
+# Função para processar a resposta do Wit.ai
+def process_wit_response(raw_response):
+    responses = raw_response.strip().split('\n')
+    transcribed_text = None
+
+    for r in responses:
+        try:
+            # Tenta processar cada linha como JSON
+            data = json.loads(r)
+            print("🔍 JSON processado com sucesso:", data)
+
+            # Verifica se o campo "text" existe e se é a resposta final
+            if "text" in data:
+                transcribed_text = data["text"]
+                if data.get("is_final", False):
+                    break  # Se encontrar uma resposta final válida, sai do loop
+        except json.JSONDecodeError as e:
+            print(f"⚠️ Erro ao processar JSON: {e}. Tentando novamente com próxima resposta.")
+            # Aqui podemos retornar uma mensagem mais específica ou continuar com o próximo
+            continue
+        except Exception as e:
+            print(f"⚠️ Erro inesperado: {e}. Tentando novamente com próxima resposta.")
+            continue
+    # Se encontrou uma transcrição válida, retorna
+    if transcribed_text:
+        return transcribed_text
+
+    # Caso contrário, retorna None ou uma mensagem de erro
+    return "😕 Não consegui entender o que foi dito, tente novamente."
+
+# Função para enviar o áudio para o Wit.ai e obter a transcrição
+def send_to_wit(wav_file):
+    headers = {
+        'Authorization': f'Bearer {WIT_AI_TOKEN}',
+        'Content-Type': 'audio/wav'
+    }
+    with open(wav_file, 'rb') as f:
+        response = requests.post('https://api.wit.ai/speech?v=20250514', headers=headers, data=f)
+
+    # Tratar falha de conexão ou outros erros de rede
+    if response.status_code != 200:
+        raise Exception(f"Erro ao conectar ao Wit.ai: {response.status_code} - {response.text}")
+
+    return response.text
+
+# Manipulador de comando /start
+@bot.message_handler(commands=['start'])
+def start_handler(message):
+    bot.reply_to(message, "Olá! Envie um áudio de voz e eu vou transcrevê-lo com IA 🤖🎧")
+
+# Manipulador de mensagens de voz
+@bot.message_handler(content_types=['voice'])
+def handle_voice(message):
+    try:
+        print("🎙️ Recebeu um áudio!")
+
+        # Baixar o arquivo de áudio
+        file_info = bot.get_file(message.voice.file_id)
+        downloaded_file = bot.download_file(file_info.file_path)
+        ogg_filename = f"{uuid.uuid4()}.ogg"
+
+        with open(ogg_filename, 'wb') as f:
+            f.write(downloaded_file)
+
+        # Converte para WAV (16kHz, mono, 16-bit PCM)
+        wav_filename = ogg_filename.replace('.ogg', '.wav')
+        subprocess.run(['ffmpeg', '-i', ogg_filename, '-ar', '16000', '-ac', '1', '-f', 'wav', wav_filename], check=True)
+
+        print("⏳ Enviando áudio convertido para o Wit.ai...")
+
+        # Enviar áudio para o Wit.ai e processar a resposta
+        wit_response = send_to_wit(wav_filename)
+        transcribed_text = process_wit_response(wit_response)
+
+        # Limpar arquivos temporários
+        os.remove(ogg_filename)
+        os.remove(wav_filename)
+
+        if transcribed_text:
+            bot.reply_to(message, f"📝 Você disse: {transcribed_text}")
+        else:
+            bot.reply_to(message, "😕 Não entendi o que foi dito.")
+
+    # Erro de conexão com o Wit.ai
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Erro de conexão com Wit.ai: {e}")
+        bot.reply_to(message, "❌ Não consegui me conectar ao serviço de transcrição.")
+
+    # Erro de conversão de áudio
+    except subprocess.CalledProcessError as e:
+        print(f"❌ Erro ao converter o áudio: {e}")
+        bot.reply_to(message, "❌ Ocorreu um erro ao processar o áudio. Tente novamente.")
+
+    # Erro geral de outros tipos
+    except Exception as e:
+        print("❌ Erro geral:", e)
+        bot.reply_to(message, "❌ Ocorreu um erro ao processar seu áudio. Tente novamente.")
+
+bot.polling()
